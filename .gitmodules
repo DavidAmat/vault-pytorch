@@ -1,0 +1,6 @@
+[submodule "pytorch-deep-learning"]
+	path = pytorch-deep-learning
+	url = https://github.com/DavidAmat/pytorch-deep-learning
+[submodule "EffectivePyTorch"]
+	path = EffectivePyTorch
+	url = https://github.com/DavidAmat/EffectivePyTorch
