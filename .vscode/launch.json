@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "VAE",
+            "type": "python",
+            "python": "/Users/davidamat/anaconda3/envs/vault_pytorch/bin/python",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "cwd": "/Users/davidamat/Documents/david/vault/vault-pytorch/personal/vae",
+        }
+    ]
+}

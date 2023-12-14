@@ -8,4 +8,6 @@ matplotlib
 scikit-learn
 
 tensorboard
+tensorflow
+tensorflow_probability
 torchsummary

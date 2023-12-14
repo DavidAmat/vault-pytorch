@@ -9,11 +9,16 @@ from PIL import Image
 from torch.utils.data import DataLoader
 from torchsummary import summary
 from torchvision import datasets, transforms
+from torch.utils.tensorboard import SummaryWriter
 
-from vae.utils import ApplyPad
+
+from utils import ApplyPad
 
 matplotlib.use('TkAgg')  # Use Tkinter as the backend
 import matplotlib.pyplot as plt
+
+# Move the model and data to the GPU if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Hyperparameters
 batch_size = 64
@@ -41,7 +46,7 @@ train_dataset = datasets.FashionMNIST(root='./data', train=True, download=True ,
 train_loader = DataLoader(
     dataset=train_dataset,
     batch_size=batch_size,
-    num_workers=2,
+    num_workers=1,
     shuffle=True
 )
 
@@ -137,72 +142,148 @@ class Autoencoder(nn.Module):
     
 # Create an instance
 autoencoder = Autoencoder(input_channels=CHANNELS, embedding_dim=EMBEDDING_DIM)
+autoencoder.to(device)
+
+# Loss function and optimizer
+criterion = nn.MSELoss()
+optimizer = optim.Adam(autoencoder.parameters(), lr=learning_rate)
 
 
-# --------------------------------- #
-# --------------------------------- #  
-#       Dry Run
-# --------------------------------- # 
-# --------------------------------- # 
-# ---------------- #
-# Example
-# ---------------- #
-iter_loader = iter(train_loader)
-b1 = next(iter_loader)
-b11 = b1[0]  # ([64, 1, 32, 32])
-c11 = encoder(b11) # ([64, 2])
-d11 = decoder(c11) # ([64, 1, 32, 32])
-d12 = autoencoder(b11)  # ([64, 1, 32, 32])
+# Create a TensorBoard writer
+# writer = SummaryWriter()
 
+if __name__ == '__main__':
 
-sample1 = d12[0,0,:,:].detach().numpy()
-plt.imshow(sample1, cmap="gray_r")
-plt.show()
+    # Training loop
+    for epoch in range(epochs):
+        total_loss = 0.0
 
-# ---------------- #
-# Debugging DECODER
-# ---------------- #
-# Debug decoder
-x = c11 = encoder(b11)
-x1 = decoder.fc(x)
-reshaping = (x1.size(0), *decoder.shape_before_flattening)
-x1 = x1.reshape(reshaping)  # ([64, 128, 4, 4])
-x2 = decoder.conv_transpose1(x1)  # ([64, 128, 8, 8])
-x3 = decoder.conv_transpose2(x2)  # ([64, 64, 16, 16])
+        for batch_idx, data in enumerate(train_loader):
+            inputs, _ = data
+            # shape inputs: torch.Size([64, 1, 32, 32])
 
+            # Move data to the GPU
+            inputs = inputs.to(device)
 
-# --------------------------------- #
-# --------------------------------- #  
-#       Insights
-# --------------------------------- # 
-# --------------------------------- # 
+            # Forward pass
+            outputs = autoencoder(inputs)
+            # torch.Size([64, 1, 32, 32])
 
-####################
-# ENCODER SUMMARY
-####################
-# Specify the input size (channels, height, width)
-input_size = (1, 32, 32)
+            # Compute the loss
+            loss = criterion(outputs, inputs)
 
-# Summary
-summary(encoder, input_size=input_size)
+            # Backward pass and optimization
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-####################
-# DECODER SUMMARY
-####################
-# Specify the input size (channels, height, width)
-input_size = (2,)
+            total_loss += loss.item()
 
-# Summary
-summary(decoder, input_size=input_size)
+            # Print statistics every 100 batches
+            if (batch_idx + 1) % 100 == 0:
+                print(f'Epoch [{epoch + 1}/{epochs}], Batch [{batch_idx + 1}/{len(train_loader)}], Loss: {loss.item():.4f}')
+
+        # Print average loss at the end of each epoch
+        average_loss = total_loss / len(train_loader)
+        print(f'Epoch [{epoch + 1}/{epochs}], Average Loss: {average_loss:.4f}')
+
+        # Add average loss to TensorBoard
+        # writer.add_scalar('Loss/train', average_loss, epoch)
+
+    # Start TensorBoard in Colab
+    # %load_ext tensorboard
+    # %tensorboard --logdir=runs
+
+    # Save the trained model
+    torch.save(autoencoder.state_dict(), 'autoencoder_model.pth')
 
 
 
+    # Visualize some reconstructed images
+    with torch.no_grad():
+        sample_images, _ = iter(train_loader).next()
+        reconstructed_images = autoencoder(sample_images)
+
+        # Display the original and reconstructed images
+        num_images = min(batch_size, 8)
+        fig, axes = plt.subplots(2, num_images, figsize=(num_images * 2, 4))
+
+        for i in range(num_images):
+            axes[0, i].imshow(sample_images[i].squeeze().numpy(), cmap='gray')
+            axes[0, i].axis('off')
+            axes[0, i].set_title('Original')
+
+            axes[1, i].imshow(reconstructed_images[i].squeeze().numpy(), cmap='gray')
+            axes[1, i].axis('off')
+            axes[1, i].set_title('Reconstructed')
+
+        plt.show()
+
+
+    # --------------------------------- #
+    # --------------------------------- #  
+    #       Dry Run
+    # --------------------------------- # 
+    # --------------------------------- # 
+    # ---------------- #
+    # Example
+    # ---------------- #
+    iter_loader = iter(train_loader)
+    b1 = next(iter_loader)
+    b11 = b1[0]  # ([64, 1, 32, 32])
+    c11 = encoder(b11) # ([64, 2])
+    d11 = decoder(c11) # ([64, 1, 32, 32])
+    d12 = autoencoder(b11)  # ([64, 1, 32, 32])
+
+
+    sample1 = d12[0,0,:,:].detach().numpy()
+    plt.imshow(sample1, cmap="gray_r")
+    plt.show()
+
+    # ---------------- #
+    # Debugging DECODER
+    # ---------------- #
+    # Debug decoder
+    x = c11 = encoder(b11)
+    x1 = decoder.fc(x)
+    reshaping = (x1.size(0), *decoder.shape_before_flattening)
+    x1 = x1.reshape(reshaping)  # ([64, 128, 4, 4])
+    x2 = decoder.conv_transpose1(x1)  # ([64, 128, 8, 8])
+    x3 = decoder.conv_transpose2(x2)  # ([64, 64, 16, 16])
+
+
+    # --------------------------------- #
+    # --------------------------------- #  
+    #       Insights
+    # --------------------------------- # 
+    # --------------------------------- # 
+
+    ####################
+    # ENCODER SUMMARY
+    ####################
+    # Specify the input size (channels, height, width)
+    input_size = (1, 32, 32)
+
+    # Summary
+    summary(encoder, input_size=input_size)
+
+    ####################
+    # DECODER SUMMARY
+    ####################
+    # Specify the input size (channels, height, width)
+    input_size = (2,)
+
+    # Summary
+    summary(decoder, input_size=input_size)
 
 
 
 
-# loader = iter(train_loader)
-# b1 = next(loader)
+
+
+
+    # loader = iter(train_loader)
+    # b1 = next(loader)
 
 
 

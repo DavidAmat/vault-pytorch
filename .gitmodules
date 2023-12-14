@@ -4,3 +4,6 @@
 [submodule "EffectivePyTorch"]
 	path = EffectivePyTorch
 	url = https://github.com/DavidAmat/EffectivePyTorch
+[submodule "repos/Hands-On-Graph-Neural-Networks-Using-Python"]
+	path = repos/Hands-On-Graph-Neural-Networks-Using-Python
+	url = https://github.com/PacktPublishing/Hands-On-Graph-Neural-Networks-Using-Python.git
