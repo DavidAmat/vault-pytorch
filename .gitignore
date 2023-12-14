@@ -1,0 +1,4 @@
+*.pyc
+
+# Personal
+personal/vae/data/*
