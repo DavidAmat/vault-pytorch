@@ -5,6 +5,7 @@ from torch import nn
 from torch_geometric.utils import structured_negative_sampling
 from utils import bpr_loss, get_metrics, ndcg_at_k
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class LightGCN(nn.Module):
     def __init__(self, 
@@ -17,12 +18,12 @@ class LightGCN(nn.Module):
         self.num_users = num_users
         self.num_items = num_items
         self.num_layers = num_layers
-        self.emb_users = nn.Embedding(num_embeddings=self.num_users, embedding_dim=dim_h)
-        self.emb_items = nn.Embedding(num_embeddings=self.num_items, embedding_dim=dim_h)
+        self.emb_users = nn.Embedding(num_embeddings=self.num_users, embedding_dim=dim_h, dtype=torch.float32)
+        self.emb_items = nn.Embedding(num_embeddings=self.num_items, embedding_dim=dim_h, dtype=torch.float32)
         self.edge_index = edge_index
         self.edge_values = edge_values
         self.adj_mat = self.compute_norm_adj_matrix(edge_index, edge_values)
-        self.sp_adj_mat = self._convert_sp_mat_to_sp_tensor(self.adj_mat)
+        self.sp_adj_mat = self._convert_sp_mat_to_csr_tensor(self.adj_mat)
         self.alpha = 1/(self.num_layers+1)
         self.batch_size = batch_size
 
@@ -38,7 +39,12 @@ class LightGCN(nn.Module):
         self.edge_index_val = edge_index_val
         self.edge_values_val = edge_values_val
         self.val_adj_mat = self.compute_norm_adj_matrix(edge_index_val, edge_values_val, is_valid=True)        
-        self.sp_val_adj_mat = self._convert_sp_mat_to_sp_tensor(self.val_adj_mat)
+        self.sp_val_adj_mat = self._convert_sp_mat_to_csr_tensor(self.val_adj_mat)
+
+        # Move sparse matrices to cuda if device is cuda
+        if device == torch.device('cuda'):
+            self.sp_val_adj_mat = self.sp_val_adj_mat.cuda()
+            self.sp_adj_mat = self.sp_adj_mat.cuda()            
     
     def _generate_positives_negative_edges(self):
         edge_index = self.edge_index
@@ -58,38 +64,51 @@ class LightGCN(nn.Module):
         
         
     @staticmethod
-    def _convert_sp_mat_to_sp_tensor(X):
-        coo = X.tocoo().astype(np.float32)
-        row = torch.Tensor(coo.row).long()
-        col = torch.Tensor(coo.col).long()
+    def _convert_sp_mat_to_csr_tensor(X):
+        coo = X.tocoo().astype(np.float32)  # Convert to float32
+        row = torch.tensor(coo.row, dtype=torch.long)
+        col = torch.tensor(coo.col, dtype=torch.long)
         index = torch.stack([row, col])
-        data = torch.FloatTensor(coo.data)
-        return torch.sparse.FloatTensor(index, data, torch.Size(coo.shape))
+        data = torch.tensor(coo.data, dtype=torch.float32)  # Convert to float32
+        sparse_tensor = torch.sparse.FloatTensor(index, data, torch.Size(coo.shape))
+        return sparse_tensor.to_sparse_csr() 
+
+    @staticmethod
+    def efficient_adj_matrix(edge_values, edge_indices, num_rows, num_cols):
+        # Extract rows (users) and cols (items)
+        row, col = edge_indices
+        
+        # M + N users and items
+        num_tot = num_rows + num_cols
+        
+        # New indexing considering A matrix being a M+N
+        values_tot = np.hstack((edge_values, edge_values))
+
+        # Displace the items_ids by M units to form the item_id in the M+N matrix
+        row_tot = np.hstack((
+            row, col + num_rows
+        ))
+        col_tot = np.hstack((
+            col + num_rows, row
+        ))
+
+        A_coo = sp.coo_matrix(
+            (values_tot, (row_tot, col_tot)),
+            shape=(num_tot, num_tot)
+        )
+        return A_coo
     
     def compute_norm_adj_matrix(self, edge_index, edge_values, is_valid=False):
-        num_users = self.num_users
-        num_items = self.num_items
-        # Interaction matrix
-        R = sp.coo_matrix((
-            edge_values, 
-            (edge_index[0], edge_index[1])),
-            shape=(num_users, num_items))
-        R = R.tolil()
 
-        # Save interaction matrix
-        if not is_valid:
-            self.R = R
-        else:
-            self.R_valid = R
-        
-        # Adjacency matrix
-        MN = self.num_users + self.num_items
-        adj_mat = sp.dok_matrix((MN, MN), dtype=np.float32)
-        adj_mat = adj_mat.tolil()
-        
-        # Fill adjacency matrix
-        adj_mat[:num_users, num_users:] = R
-        adj_mat[num_users:, :num_users] = R.T
+        # Efficient Adjacency matrix as a COO matrix
+        adj_mat = self.efficient_adj_matrix(
+            edge_values=edge_values,
+            edge_indices=edge_index,
+            num_rows=self.num_users,
+            num_cols=self.num_items
+        )
+        # Row-summation (to get degrees) is better with CSR format
+        adj_mat = adj_mat.tocsr()
         
         # Degrees
         rowsum = np.array(adj_mat.sum(1))
@@ -177,8 +196,15 @@ class LightGCN(nn.Module):
     
     def get_val_metrics(self, epoch: int, topk_recs=10, k_list=[1,2,3]):
     
+        # In CPU otherwise OOO error in GPU
+        ratings = torch.matmul(
+            self.emb_users.weight.to("cpu").to(torch.float32), 
+            self.emb_items.weight.T.to("cpu").to(torch.float32)
+        )
+
         # Get ratings by embeddings dot products
-        ratings = torch.matmul(self.emb_users.weight, self.emb_items.weight.T)
+        # WARNING: in CUDA this gives OOO error
+        # ratings = torch.matmul(self.emb_users.weight, self.emb_items.weight.T)
 
         # Exclude interactions in the train_set
         excl_user_indices, excl_item_indices = self.edge_index
@@ -195,11 +221,21 @@ class LightGCN(nn.Module):
         l_prec_recall = get_metrics(
             top_rec_items=top_K_items,
             ground_truth=self.edge_index_val,
-            k_list=k_list
+            k_list=k_list,
+            num_users=self.num_users,
+            num_items=self.num_items,
         )
 
         # NDCG at K (list of tuples so that we can add to the l_metrics tuples)
-        l_ndcg = [(ndcg_at_k(top_rec_items=top_K_items, ground_truth=self.edge_index_val, k=kk),) for kk in k_list]
+        l_ndcg = [
+            (ndcg_at_k(
+                top_rec_items=top_K_items, 
+                ground_truth=self.edge_index_val, 
+                k=kk,
+                num_users=self.num_users
+            ),) 
+            for kk in k_list
+        ]
 
         l_metrics = [(epoch,) + l_prec_recall[idx] + l_ndcg[idx] for idx in range(len(k_list))]
         # Convert to dataframe

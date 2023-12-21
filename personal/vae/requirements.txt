@@ -1,0 +1,13 @@
+torch
+torchvision
+
+numpy
+pandas
+tqdm
+matplotlib
+scikit-learn
+
+tensorboard
+tensorflow
+tensorflow_probability
+torchsummary

@@ -1,5 +1,6 @@
-import torch
+import numpy as np
 import scipy.sparse as sp
+import torch
 
 
 def sparse_matrix_memory_usage(input_matrix: sp):
@@ -26,11 +27,25 @@ def sparse_tensor_memory_usage(sparse_tensor: torch.sparse_coo):
     print(f"Total memory usage: {total_memory_mb:.4f} MB")
     
 
+def sum_rows_sparse_tensor(sparse_tensor_coo: torch.sparse_coo):
+
+    # Convert from Pytorch Sparse Tensor to Scipy COO Matrix Sparse
+    scipy_sp_coo = sp.coo_matrix(
+        (sparse_tensor_coo.coalesce().values().numpy(), 
+         sparse_tensor_coo.coalesce().indices().numpy()), 
+        shape=sparse_tensor_coo.size()
+    )
+
+    # Do the CSR change to then sum row-wise (per user) all the occurences
+    scipy_sp_csr = scipy_sp_coo.tocsr()
+    return np.array(scipy_sp_csr.sum(axis=1)).flatten()
     
     
 def get_metrics(
     top_rec_items: torch.Tensor,
     ground_truth: torch.Tensor,
+    num_users: int,
+    num_items: int,
     k_list: list
 ):
     """
@@ -61,6 +76,12 @@ def get_metrics(
     k_list: list
         List of K's we will iterate to compute Prec@K and Rec@K metrics
         
+    num_users: int
+        Number of users (rows)
+
+    num_items: int
+        Number of items (columns)
+
     Examples:
     # Each row is a user
     # Each column represents the ranking of the item_ids ranked by embedding dot product of user x item embs
@@ -90,43 +111,49 @@ def get_metrics(
     """
     d_results = []
 
+    # Sparse Tensor of Ground Truth User-Items interactions
+    sp_truth = torch.sparse_coo_tensor(
+        ground_truth,
+        torch.ones_like(ground_truth[0,:], dtype=torch.float32),
+        size=(num_users, num_items)
+    )
+
     # Set the value of k
     for k in k_list:
 
-        # BINARY TENSORY FOR TOP-K USER-ITEM INTERACTION
-        # Create binary tensors indicating whether the item is in the top k predictions
-        top_k_binary = torch.zeros_like(top_rec_items, dtype=torch.float32)
+        # ------------------------------ #
+        #     Recs interaction matrix
+        # ------------------------------ #
 
-        # Here we take the recommended list and apply the top-K constraint (slicing)
-        top_k_binary.scatter_(1, top_rec_items[:, :k], 1)
-        # the way to interpret this tensor is:
-        # for a given user, we look at its row (user_id=0, we look at row 0)
-        # there will be a 1 in the index column representing the index of the item in which user_id=0
-        # interacted with (in this case, user_id=0 have as the first k=2 items, items_ids 2 and 0
-        # this is why in the first row of top_k_binary, we have 1,0,1 (item 1 is not found in the k=2 items)
+        # Slice the recommendations into the k-th item recommended
+        top_K_items = top_rec_items[:, :k]
 
+        # Flatten the dense tensor of the item_ids (originally in form n_users x k)
+        item_indices = top_K_items.flatten()
 
-        # Create binary tensors indicating whether the item is in the ground truth
-        ground_truth_binary = torch.zeros_like(top_rec_items, dtype=torch.float32)
+        # Generate row and column indices (repeating k times each user to reach length n_users x k)
+        user_indices = torch.arange(num_users).repeat(k)
 
-        # Each row of the truth binary is a user id
-        # There will be a 1 placed at the item_id position defined by the ground_truth tensor
-        # If the first column of the ground truth tensor is [0,2], it means that user_id = 0 (first row)
-        # will have a 1 placed at column 2 (item_id=2).
-        # We need to transpose the ground_truth
+        # Sparse Tensor of K-Recs
+        sp_recs_matrix = torch.sparse_coo_tensor(
+            torch.stack([user_indices, item_indices]),
+            torch.ones_like(item_indices, dtype=torch.float32),
+            size=(num_users, num_items)
+        )
 
-        ground_truth_binary[ground_truth[0,:], ground_truth[1,:]] = 1
-
-        # The correctly predicted recs will be the overlap of 1's in both the ground truth and the top_k_binary
-        correctly_pred_recs = torch.mul(ground_truth_binary, top_k_binary)
+        # ------------------------------ #
+        #     Correct recs
+        # ------------------------------ #
+        # True Positives (point-wise multiplication of K-Recs * Truth)
+        correct_recs = torch.mul(sp_recs_matrix, sp_truth)
 
         # True Positives and All Positives per user
-        true_positives_per_user = correctly_pred_recs.sum(dim=1)
+        true_positives_per_user = sum_rows_sparse_tensor(correct_recs)
+        all_positives_per_user = sum_rows_sparse_tensor(sp_truth)
         false_positives_per_user = k - true_positives_per_user
-        all_positives_per_user = ground_truth_binary.sum(dim=1)
 
-        # Select only users that have at least 1 positive
-        users_ids_with_positives = torch.where(all_positives_per_user >= 1)[0]
+        # Select only users that have at least 1 positive in ground truth
+        users_ids_with_positives = np.where(all_positives_per_user >= 1)[0]
 
         # Take the TP, FP and all P for the users with at least 1 positive
         true_positives = true_positives_per_user[users_ids_with_positives]
@@ -147,15 +174,16 @@ def get_metrics(
             precision,
             recall
         ))
-
-    # Convert d_results to a dataframe with this
-    # df_results = pd.DataFrame(d_results, columns=["K", "TP", "FP", "P", "precision", "recall"])
+        # Convert d_results to a dataframe with this
+        # df_results = pd.DataFrame(d_results, columns=["K", "TP", "FP", "P", "precision", "recall"])
     return d_results
+
 
 def ndcg_at_k(
     top_rec_items: torch.Tensor,
     ground_truth: torch.Tensor,
-    k: int
+    k: int,
+    num_users: int
 ):
     """"
     Get the NDCG per user and averages it returning the mean NDCG.
@@ -194,8 +222,7 @@ def ndcg_at_k(
     # Create the weights of the log tensor
     logs_tensor = torch.Tensor(1./np.log2(np.arange(2, k + 2)))
 
-
-    for user_id in range(model.num_users):
+    for user_id in range(num_users):
         # In the ground truth tensor, which is the column ids that this user is present
         idx_interaction_col_userid = ground_truth[0] == user_id
 
