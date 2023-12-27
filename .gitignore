@@ -2,3 +2,6 @@
 
 # Personal
 personal/vae/data/*
+**/.ipynb_checkpoints/**
+**checkpoint.ipynb
+*.DS_Store
