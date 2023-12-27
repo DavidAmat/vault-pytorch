@@ -7,3 +7,6 @@
 [submodule "repos/Hands-On-Graph-Neural-Networks-Using-Python"]
 	path = repos/Hands-On-Graph-Neural-Networks-Using-Python
 	url = https://github.com/PacktPublishing/Hands-On-Graph-Neural-Networks-Using-Python.git
+[submodule "repos/Generative_Deep_Learning_2nd_Edition"]
+	path = repos/Generative_Deep_Learning_2nd_Edition
+	url = https://github.com/davidADSP/Generative_Deep_Learning_2nd_Edition.git
